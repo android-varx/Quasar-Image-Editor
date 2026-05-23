@@ -1,4 +1,4 @@
-# Quasar Secure - Éditeur d'Image
+# Quasar - Éditeur d'Image
 
 C'est le projet Quasar Secure, un éditeur d'image développé en Rust.
 
