@@ -178,6 +178,13 @@ pub fn show_sidebar(app: &mut QuasarApp, ctx: &egui::Context)
 
                     if ui.add(btn).clicked() {
                         app.active_tool = *tool;
+                        if app.active_tool == Tool::Rognage {
+                            app.crop_left = 0;
+                            app.crop_right = 0;
+                            app.crop_top = 0;
+                            app.crop_bottom = 0;
+                            app.crop_active_handle = None;
+                        }
                         if app.active_tool != Tool::Filter {
                             if app.pre_filter_image.is_some() {
                                 app.pre_filter_image = None;
@@ -208,46 +215,135 @@ pub fn show_sidebar(app: &mut QuasarApp, ctx: &egui::Context)
             .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
-                ui.label(egui::RichText::new("Taille du trait").size(11.0).color(theme::TEXT_MUTED));
-                ui.spacing_mut().slider_width = 120.0;
-                ui.add(egui::Slider::new(&mut app.brush_size, 1..=50));
-                
-                if app.active_tool == Tool::Filter {
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Opacité du filtre").size(11.0).color(theme::TEXT_MUTED));
+                if app.active_tool == Tool::Rognage {
+
+                    ui.label(egui::RichText::new("Marges de rognage").size(11.0).color(theme::TEXT_MUTED));
                     
-                    let mut opacity_val = (app.filter_opacity * 50.0).round() as i32;
-                    if opacity_val == 0 { opacity_val = 1; }
-                    let filter_slider = ui.add(egui::Slider::new(&mut opacity_val, 1..=50));
+                    let img_w = app.image_buffer.width();
+                    let img_h = app.image_buffer.height();
+                    let min_size = 10;
                     
-                    if filter_slider.drag_started() {
-                        if app.pre_filter_image.is_none() {
-                            app.save_state();
-                            app.pre_filter_image = Some(app.image_buffer.clone());
-                        }
-                    }
+                    let max_left = img_w.saturating_sub(app.crop_right).saturating_sub(min_size);
+                    let max_right = img_w.saturating_sub(app.crop_left).saturating_sub(min_size);
+                    let max_top = img_h.saturating_sub(app.crop_bottom).saturating_sub(min_size);
+                    let max_bottom = img_h.saturating_sub(app.crop_top).saturating_sub(min_size);
                     
-                    if filter_slider.changed() {
-                        app.filter_opacity = opacity_val as f32 / 50.0;
-                        if app.pre_filter_image.is_none() {
-                            app.save_state();
-                            app.pre_filter_image = Some(app.image_buffer.clone());
+                    let mut changed = false;
+                    egui::Grid::new("crop_margin_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("Gauche :");
+                            let r_left = ui.add(egui::DragValue::new(&mut app.crop_left)
+                                .range(0..=max_left)
+                                .speed(1.0)
+                                .suffix(" px"));
+                            changed |= r_left.changed();
+                            ui.end_row();
+
+                            ui.label("Droite :");
+                            let r_right = ui.add(egui::DragValue::new(&mut app.crop_right)
+                                .range(0..=max_right)
+                                .speed(1.0)
+                                .suffix(" px"));
+                            changed |= r_right.changed();
+                            ui.end_row();
+
+                            ui.label("Haut :");
+                            let r_top = ui.add(egui::DragValue::new(&mut app.crop_top)
+                                .range(0..=max_top)
+                                .speed(1.0)
+                                .suffix(" px"));
+                            changed |= r_top.changed();
+                            ui.end_row();
+
+                            ui.label("Bas :");
+                            let r_bottom = ui.add(egui::DragValue::new(&mut app.crop_bottom)
+                                .range(0..=max_bottom)
+                                .speed(1.0)
+                                .suffix(" px"));
+                            changed |= r_bottom.changed();
+                            ui.end_row();
+                        });
+                        
+
+                    
+                    ui.add_space(10.0);
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("❌ Réinit.").clicked() {
+                            app.crop_left = 0;
+                            app.crop_right = 0;
+                            app.crop_top = 0;
+                            app.crop_bottom = 0;
                         }
                         
-                        if let Some(ref base_img) = app.pre_filter_image {
-                            app.image_buffer = base_img.clone();
-                            if app.filter_opacity > 0.0 {
-                                crate::filtres::apply_color_filter(&mut app.image_buffer, app.current_color, app.selection_mask, app.filter_opacity);
+                        let confirm_btn = ui.add(egui::Button::new(
+                            egui::RichText::new("✓ Rogner").strong().color(egui::Color32::WHITE)
+                        ).fill(theme::BTN_ACTIVE_BG));
+                        
+                        if confirm_btn.clicked() {
+                            let sx = app.crop_left;
+                            let sy = app.crop_top;
+                            let ex = img_w.saturating_sub(app.crop_right);
+                            let ey = img_h.saturating_sub(app.crop_bottom);
+                            
+                            app.save_state();
+                            if let Some(new_img) = crate::rognage::apply_crop(&mut app.image_buffer, sx, sy, ex, ey) {
+                                app.image_buffer = new_img;
+                                app.original_image = app.image_buffer.clone();
+                                app.texture = None;
+                                app.selection_mask = None;
                             }
-                            app.update_texture(ui.ctx()); // Force texture update without flickering
+                            app.crop_left = 0;
+                            app.crop_right = 0;
+                            app.crop_top = 0;
+                            app.crop_bottom = 0;
+                            app.crop_active_handle = None;
+                        }
+                    });
+                } else {
+                    ui.label(egui::RichText::new("Taille du trait").size(11.0).color(theme::TEXT_MUTED));
+                    ui.spacing_mut().slider_width = 120.0;
+                    ui.add(egui::Slider::new(&mut app.brush_size, 1..=50));
+                    
+                    if app.active_tool == Tool::Filter {
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Opacité du filtre").size(11.0).color(theme::TEXT_MUTED));
+                        
+                        let mut opacity_val = (app.filter_opacity * 50.0).round() as i32;
+                        if opacity_val == 0 { opacity_val = 1; }
+                        let filter_slider = ui.add(egui::Slider::new(&mut opacity_val, 1..=50));
+                        
+                        if filter_slider.drag_started() {
+                            if app.pre_filter_image.is_none() {
+                                app.save_state();
+                                app.pre_filter_image = Some(app.image_buffer.clone());
+                            }
+                        }
+                        
+                        if filter_slider.changed() {
+                            app.filter_opacity = opacity_val as f32 / 50.0;
+                            if app.pre_filter_image.is_none() {
+                                app.save_state();
+                                app.pre_filter_image = Some(app.image_buffer.clone());
+                            }
+                            
+                            if let Some(ref base_img) = app.pre_filter_image {
+                                app.image_buffer = base_img.clone();
+                                if app.filter_opacity > 0.0 {
+                                    crate::filtres::apply_color_filter(&mut app.image_buffer, app.current_color, app.selection_mask, app.filter_opacity);
+                                }
+                                app.update_texture(ui.ctx()); // Force texture update without flickering
+                            }
                         }
                     }
-                }
-                
-                if app.selection_mask.is_some() {
-                    ui.add_space(8.0);
-                    if ui.button("❌ Annuler sélection").clicked() {
-                        app.selection_mask = None;
+                    
+                    if app.selection_mask.is_some() {
+                        ui.add_space(8.0);
+                        if ui.button("❌ Annuler sélection").clicked() {
+                            app.selection_mask = None;
+                        }
                     }
                 }
             });

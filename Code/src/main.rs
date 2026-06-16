@@ -24,6 +24,21 @@ pub enum Tool
     Selection,
 }
 
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub enum CropHandle {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Center,
+}
+
+
+
 pub struct QuasarApp
 {
     pub original_image: RgbaImage,
@@ -41,6 +56,13 @@ pub struct QuasarApp
     pub pre_filter_image: Option<RgbaImage>,
     pub undo_history: Vec<(RgbaImage, RgbaImage, Option<(u32, u32, u32, u32)>)>,
     pub redo_history: Vec<(RgbaImage, RgbaImage, Option<(u32, u32, u32, u32)>)>,
+    
+    // Crop state
+    pub crop_left: u32,
+    pub crop_right: u32,
+    pub crop_top: u32,
+    pub crop_bottom: u32,
+    pub crop_active_handle: Option<CropHandle>,
 }
 
 impl QuasarApp
@@ -94,6 +116,11 @@ impl QuasarApp
             pre_filter_image: None,
             undo_history: Vec::new(),
             redo_history: Vec::new(),
+            crop_left: 0,
+            crop_right: 0,
+            crop_top: 0,
+            crop_bottom: 0,
+            crop_active_handle: None,
         }
     }
 
@@ -154,6 +181,8 @@ impl QuasarApp
             self.filter_opacity = 0.0;
         }
     }
+
+
 }
 
 impl eframe::App for QuasarApp
@@ -241,6 +270,103 @@ impl eframe::App for QuasarApp
                         painter.rect_filled(rect_sel, 0.0, egui::Color32::from_rgba_unmultiplied(100, 200, 255, 30));
                     }
 
+                    // Mouse hovering checks when Tool::Rognage
+                    let mut hovered_handle = None;
+                    if self.active_tool == Tool::Rognage {
+                        let crop_left_screen = rect.min.x + self.crop_left as f32 * self.zoom_level;
+                        let crop_right_screen = rect.max.x - self.crop_right as f32 * self.zoom_level;
+                        let crop_top_screen = rect.min.y + self.crop_top as f32 * self.zoom_level;
+                        let crop_bottom_screen = rect.max.y - self.crop_bottom as f32 * self.zoom_level;
+                        
+                        let crop_rect = egui::Rect::from_min_max(
+                            egui::pos2(crop_left_screen.min(rect.max.x).max(rect.min.x), crop_top_screen.min(rect.max.y).max(rect.min.y)),
+                            egui::pos2(crop_right_screen.min(rect.max.x).max(rect.min.x), crop_bottom_screen.min(rect.max.y).max(rect.min.y)),
+                        );
+                        
+                        let hover_threshold = 15.0;
+                        let handles = [
+                            (CropHandle::TopLeft, crop_rect.left_top()),
+                            (CropHandle::TopRight, crop_rect.right_top()),
+                            (CropHandle::BottomLeft, crop_rect.left_bottom()),
+                            (CropHandle::BottomRight, crop_rect.right_bottom()),
+                            (CropHandle::Left, egui::pos2(crop_rect.left(), crop_rect.center().y)),
+                            (CropHandle::Right, egui::pos2(crop_rect.right(), crop_rect.center().y)),
+                            (CropHandle::Top, egui::pos2(crop_rect.center().x, crop_rect.top())),
+                            (CropHandle::Bottom, egui::pos2(crop_rect.center().x, crop_rect.bottom())),
+                        ];
+                        
+                        if let Some(mpos) = response.hover_pos() {
+                            let mut min_dist = hover_threshold;
+                            for (handle, pos) in &handles {
+                                let dist = mpos.distance(*pos);
+                                if dist < min_dist {
+                                    min_dist = dist;
+                                    hovered_handle = Some(*handle);
+                                }
+                            }
+                            
+                            if hovered_handle.is_none() && crop_rect.contains(mpos) {
+                                hovered_handle = Some(CropHandle::Center);
+                            }
+                        }
+
+                        // Curseur souris dynamique
+                        let active_or_hovered = self.crop_active_handle.or(hovered_handle);
+                        if let Some(handle) = active_or_hovered {
+                            let cursor = match handle {
+                                CropHandle::Left | CropHandle::Right => egui::CursorIcon::ResizeHorizontal,
+                                CropHandle::Top | CropHandle::Bottom => egui::CursorIcon::ResizeVertical,
+                                CropHandle::TopLeft | CropHandle::BottomRight => egui::CursorIcon::ResizeNorthWest,
+                                CropHandle::TopRight | CropHandle::BottomLeft => egui::CursorIcon::ResizeNorthEast,
+                                CropHandle::Center => egui::CursorIcon::Move,
+                            };
+                            ctx.set_cursor_icon(cursor);
+                        }
+
+                        // 1. Grise l'extérieur du crop
+                        let dark_overlay = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150);
+                        painter.rect_filled(egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, crop_rect.min.y)), 0.0, dark_overlay); // top
+                        painter.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.min.x, crop_rect.max.y), rect.max), 0.0, dark_overlay); // bottom
+                        painter.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.min.x, crop_rect.min.y), egui::pos2(crop_rect.min.x, crop_rect.max.y)), 0.0, dark_overlay); // left
+                        painter.rect_filled(egui::Rect::from_min_max(egui::pos2(crop_rect.max.x, crop_rect.min.y), egui::pos2(rect.max.x, crop_rect.max.y)), 0.0, dark_overlay); // right
+
+                        // 2. Lignes de composition (règle des tiers)
+                        let grid_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 60);
+                        let grid_stroke = egui::Stroke::new(1.0, grid_color);
+                        
+                        // Vertical grid lines
+                        let x1 = crop_rect.min.x + crop_rect.width() / 3.0;
+                        let x2 = crop_rect.min.x + 2.0 * crop_rect.width() / 3.0;
+                        painter.line_segment([egui::pos2(x1, crop_rect.min.y), egui::pos2(x1, crop_rect.max.y)], grid_stroke);
+                        painter.line_segment([egui::pos2(x2, crop_rect.min.y), egui::pos2(x2, crop_rect.max.y)], grid_stroke);
+                        
+                        // Horizontal grid lines
+                        let y1 = crop_rect.min.y + crop_rect.height() / 3.0;
+                        let y2 = crop_rect.min.y + 2.0 * crop_rect.height() / 3.0;
+                        painter.line_segment([egui::pos2(crop_rect.min.x, y1), egui::pos2(crop_rect.max.x, y1)], grid_stroke);
+                        painter.line_segment([egui::pos2(crop_rect.min.x, y2), egui::pos2(crop_rect.max.x, y2)], grid_stroke);
+
+                        // 3. Cadre de rognage principal
+                        painter.rect_stroke(crop_rect, 0.0, (2.0, egui::Color32::WHITE), egui::StrokeKind::Middle);
+                        painter.rect_stroke(crop_rect.expand(1.0), 0.0, (1.0, egui::Color32::BLACK), egui::StrokeKind::Middle);
+
+                        // 4. Poignées d'angle
+                        let handle_stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
+                        let handle_fill = egui::Color32::WHITE;
+                        let handle_size = 8.0;
+                        for corner in &[crop_rect.left_top(), crop_rect.right_top(), crop_rect.left_bottom(), crop_rect.right_bottom()] {
+                            let r = egui::Rect::from_center_size(*corner, egui::vec2(handle_size, handle_size));
+                            painter.rect_filled(r, 1.0, handle_fill);
+                            painter.rect_stroke(r, 1.0, handle_stroke, egui::StrokeKind::Middle);
+                        }
+
+                        // 5. Flèches sur les côtés (dessinées de façon vectorielle)
+                        draw_double_arrow_horizontal(&painter, egui::pos2(crop_rect.left(), crop_rect.center().y), 14.0);
+                        draw_double_arrow_horizontal(&painter, egui::pos2(crop_rect.right(), crop_rect.center().y), 14.0);
+                        draw_double_arrow_vertical(&painter, egui::pos2(crop_rect.center().x, crop_rect.top()), 14.0);
+                        draw_double_arrow_vertical(&painter, egui::pos2(crop_rect.center().x, crop_rect.bottom()), 14.0);
+                    }
+
                     if self.active_tool != Tool::Pointer {
                         if response.drag_started() || (response.clicked() && (self.active_tool == Tool::Pencil || self.active_tool == Tool::Eraser))
                         {
@@ -252,18 +378,116 @@ impl eframe::App for QuasarApp
 
                         if response.drag_started()
                         {
-                            self.save_state();
-                            self.drag_start_pos = response.interact_pointer_pos();
-                            self.last_cursor_pos = None;
+                            if self.active_tool == Tool::Rognage {
+                                self.crop_active_handle = hovered_handle;
+                                if hovered_handle.is_none() {
+                                    self.drag_start_pos = response.interact_pointer_pos();
+                                }
+                            } else {
+                                self.save_state();
+                                self.drag_start_pos = response.interact_pointer_pos();
+                                self.last_cursor_pos = None;
+                            }
                         }
 
                         if response.dragged() || (response.clicked() && (self.active_tool == Tool::Pencil || self.active_tool == Tool::Eraser))
                         {
-                            if response.clicked() {
+                            if response.clicked() && self.active_tool != Tool::Rognage {
                                 self.save_state();
                             }
 
-                            if let Some(pos) = response.interact_pointer_pos()
+                            if self.active_tool == Tool::Rognage {
+                                if let Some(handle) = self.crop_active_handle {
+                                    if let Some(pos) = response.interact_pointer_pos() {
+                                        let img_w = self.image_buffer.width();
+                                        let img_h = self.image_buffer.height();
+                                        let min_size = 10;
+                                        
+                                        let local_pos = pos - rect.min;
+                                        let img_x = (local_pos.x / self.zoom_level).clamp(0.0, img_w as f32) as u32;
+                                        let img_y = (local_pos.y / self.zoom_level).clamp(0.0, img_h as f32) as u32;
+                                        
+                                        match handle {
+                                            CropHandle::Left => {
+                                                self.crop_left = img_x.min(img_w.saturating_sub(self.crop_right).saturating_sub(min_size));
+                                            }
+                                            CropHandle::Right => {
+                                                self.crop_right = (img_w - img_x).min(img_w.saturating_sub(self.crop_left).saturating_sub(min_size));
+                                            }
+                                            CropHandle::Top => {
+                                                self.crop_top = img_y.min(img_h.saturating_sub(self.crop_bottom).saturating_sub(min_size));
+                                            }
+                                            CropHandle::Bottom => {
+                                                self.crop_bottom = (img_h - img_y).min(img_h.saturating_sub(self.crop_top).saturating_sub(min_size));
+                                            }
+                                            CropHandle::TopLeft => {
+                                                self.crop_left = img_x.min(img_w.saturating_sub(self.crop_right).saturating_sub(min_size));
+                                                self.crop_top = img_y.min(img_h.saturating_sub(self.crop_bottom).saturating_sub(min_size));
+                                            }
+                                            CropHandle::TopRight => {
+                                                self.crop_right = (img_w - img_x).min(img_w.saturating_sub(self.crop_left).saturating_sub(min_size));
+                                                self.crop_top = img_y.min(img_h.saturating_sub(self.crop_bottom).saturating_sub(min_size));
+                                            }
+                                            CropHandle::BottomLeft => {
+                                                self.crop_left = img_x.min(img_w.saturating_sub(self.crop_right).saturating_sub(min_size));
+                                                self.crop_bottom = (img_h - img_y).min(img_h.saturating_sub(self.crop_top).saturating_sub(min_size));
+                                            }
+                                            CropHandle::BottomRight => {
+                                                self.crop_right = (img_w - img_x).min(img_w.saturating_sub(self.crop_left).saturating_sub(min_size));
+                                                self.crop_bottom = (img_h - img_y).min(img_h.saturating_sub(self.crop_top).saturating_sub(min_size));
+                                            }
+                                            CropHandle::Center => {
+                                                let delta = response.drag_delta();
+                                                let delta_x_img = (delta.x / self.zoom_level).round() as i32;
+                                                let delta_y_img = (delta.y / self.zoom_level).round() as i32;
+                                                
+                                                if delta_x_img > 0 {
+                                                    let shift = delta_x_img.min(self.crop_right as i32);
+                                                    self.crop_left = (self.crop_left as i32 + shift) as u32;
+                                                    self.crop_right = (self.crop_right as i32 - shift) as u32;
+                                                } else if delta_x_img < 0 {
+                                                    let shift = (-delta_x_img).min(self.crop_left as i32);
+                                                    self.crop_left = (self.crop_left as i32 - shift) as u32;
+                                                    self.crop_right = (self.crop_right as i32 + shift) as u32;
+                                                }
+                                                
+                                                if delta_y_img > 0 {
+                                                    let shift = delta_y_img.min(self.crop_bottom as i32);
+                                                    self.crop_top = (self.crop_top as i32 + shift) as u32;
+                                                    self.crop_bottom = (self.crop_bottom as i32 - shift) as u32;
+                                                } else if delta_y_img < 0 {
+                                                    let shift = (-delta_y_img).min(self.crop_top as i32);
+                                                    self.crop_top = (self.crop_top as i32 - shift) as u32;
+                                                    self.crop_bottom = (self.crop_bottom as i32 + shift) as u32;
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if let (Some(start_pos), Some(pos)) = (self.drag_start_pos, response.interact_pointer_pos()) {
+                                    let img_w = self.image_buffer.width();
+                                    let img_h = self.image_buffer.height();
+                                    
+                                    let start_local = start_pos - rect.min;
+                                    let pos_local = pos - rect.min;
+                                    
+                                    let sx = (start_local.x / self.zoom_level).clamp(0.0, img_w as f32) as u32;
+                                    let sy = (start_local.y / self.zoom_level).clamp(0.0, img_h as f32) as u32;
+                                    let ex = (pos_local.x / self.zoom_level).clamp(0.0, img_w as f32) as u32;
+                                    let ey = (pos_local.y / self.zoom_level).clamp(0.0, img_h as f32) as u32;
+                                    
+                                    let x0 = sx.min(ex);
+                                    let x1 = sx.max(ex);
+                                    let y0 = sy.min(ey);
+                                    let y1 = sy.max(ey);
+                                    
+                                    if x1 > x0 + 10 && y1 > y0 + 10 {
+                                        self.crop_left = x0;
+                                        self.crop_right = img_w - x1;
+                                        self.crop_top = y0;
+                                        self.crop_bottom = img_h - y1;
+                                    }
+                                }
+                            } else if let Some(pos) = response.interact_pointer_pos()
                             {
                                 let local_pos = pos - rect.min;
                                 let img_x = (local_pos.x * scale_x) as u32;
@@ -279,7 +503,7 @@ impl eframe::App for QuasarApp
                                     {
                                         canvas::erase_pencil(self, img_x, img_y);
                                     }
-                                    Tool::Rectangle | Tool::Triangle | Tool::Circle | Tool::Rognage | Tool::Selection =>
+                                    Tool::Rectangle | Tool::Triangle | Tool::Circle | Tool::Selection =>
                                     {
                                         if let Some(start_pos) = self.drag_start_pos
                                         {
@@ -290,21 +514,6 @@ impl eframe::App for QuasarApp
                                                 let color = if is_selection { egui::Color32::GRAY } else { draw_color_egui };
                                                 let thickness = if is_selection { 1.0 } else { self.brush_size as f32 };
                                                 painter.rect_stroke(rect_preview, 0.0, (thickness, color), egui::StrokeKind::Middle);
-                                            }
-                                            else if self.active_tool == Tool::Rognage
-                                            {
-                                                let rect_preview = egui::Rect::from_two_pos(start_pos, pos);
-                                                let img_rect = egui::Rect::from_min_size(rect.min, egui::vec2(self.image_buffer.width() as f32 * scale_x.recip(), self.image_buffer.height() as f32 * scale_y.recip()));
-                                                
-                                                // Grise l'extérieur du crop
-                                                let dark_overlay = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150);
-                                                painter.rect_filled(egui::Rect::from_two_pos(img_rect.min, egui::pos2(img_rect.max.x, rect_preview.min.y)), 0.0, dark_overlay); // top
-                                                painter.rect_filled(egui::Rect::from_two_pos(egui::pos2(img_rect.min.x, rect_preview.max.y), img_rect.max), 0.0, dark_overlay); // bottom
-                                                painter.rect_filled(egui::Rect::from_two_pos(egui::pos2(img_rect.min.x, rect_preview.min.y), egui::pos2(rect_preview.min.x, rect_preview.max.y)), 0.0, dark_overlay); // left
-                                                painter.rect_filled(egui::Rect::from_two_pos(egui::pos2(rect_preview.max.x, rect_preview.min.y), egui::pos2(img_rect.max.x, rect_preview.max.y)), 0.0, dark_overlay); // right
-
-                                                painter.rect_stroke(rect_preview, 0.0, (2.0, egui::Color32::WHITE), egui::StrokeKind::Middle);
-                                                painter.rect_stroke(rect_preview.expand(1.0), 0.0, (1.0, egui::Color32::BLACK), egui::StrokeKind::Middle);
                                             }
                                             else if self.active_tool == Tool::Circle
                                             {
@@ -331,10 +540,6 @@ impl eframe::App for QuasarApp
                                             self.current_color = *self.image_buffer.get_pixel(img_x, img_y);
                                         }
                                     }
-                                    Tool::Filter =>
-                                    {
-                                        // Le filtre est maintenant appliqué en temps réel via le slider dans ui_panels.rs
-                                    }
                                     _ => {}
                                 }
                             }
@@ -342,63 +547,57 @@ impl eframe::App for QuasarApp
 
                         if response.drag_stopped()
                         {
-                            if let (Some(start_pos), Some(end_pos)) = (self.drag_start_pos, response.interact_pointer_pos())
-                            {
-                                if self.active_tool == Tool::Rectangle || self.active_tool == Tool::Triangle || self.active_tool == Tool::Circle || self.active_tool == Tool::Rognage || self.active_tool == Tool::Selection
+                            if self.active_tool == Tool::Rognage {
+                                self.crop_active_handle = None;
+                            } else {
+                                if let (Some(start_pos), Some(end_pos)) = (self.drag_start_pos, response.interact_pointer_pos())
                                 {
-                                    let local_start = start_pos - rect.min;
-                                    let local_end = end_pos - rect.min;
-
-                                    let start_x = (local_start.x * scale_x) as u32;
-                                    let start_y = (local_start.y * scale_y) as u32;
-                                    let end_x = (local_end.x * scale_x) as u32;
-                                    let end_y = (local_end.y * scale_y) as u32;
-
-                                    let w = self.image_buffer.width().saturating_sub(1);
-                                    let h = self.image_buffer.height().saturating_sub(1);
-
-                                    let sx = start_x.min(w);
-                                    let sy = start_y.min(h);
-                                    let ex = end_x.min(w);
-                                    let ey = end_y.min(h);
-
-                                    match self.active_tool
+                                    if self.active_tool == Tool::Rectangle || self.active_tool == Tool::Triangle || self.active_tool == Tool::Circle || self.active_tool == Tool::Selection
                                     {
-                                        Tool::Rectangle =>
+                                        let local_start = start_pos - rect.min;
+                                        let local_end = end_pos - rect.min;
+
+                                        let start_x = (local_start.x * scale_x) as u32;
+                                        let start_y = (local_start.y * scale_y) as u32;
+                                        let end_x = (local_end.x * scale_x) as u32;
+                                        let end_y = (local_end.y * scale_y) as u32;
+
+                                        let w = self.image_buffer.width().saturating_sub(1);
+                                        let h = self.image_buffer.height().saturating_sub(1);
+
+                                        let sx = start_x.min(w);
+                                        let sy = start_y.min(h);
+                                        let ex = end_x.min(w);
+                                        let ey = end_y.min(h);
+
+                                        match self.active_tool
                                         {
-                                            formes::draw_rect_pixels(&mut self.image_buffer, sx, sy, ex, ey, draw_color_pixels, self.brush_size, self.selection_mask);
-                                            self.update_texture(ctx);
-                                        }
-                                        Tool::Triangle =>
-                                        {
-                                            formes::draw_triangle_pixels(&mut self.image_buffer, sx, sy, ex, ey, draw_color_pixels, self.brush_size, self.selection_mask);
-                                            self.update_texture(ctx);
-                                        }
-                                        Tool::Circle =>
-                                        {
-                                            let radius = ((ex as f32 - start_x as f32).powi(2) + (ey as f32 - start_y as f32).powi(2)).sqrt() as i32;
-                                            formes::draw_circle_pixels(&mut self.image_buffer, start_x as i32, start_y as i32, radius, draw_color_pixels, self.brush_size, self.selection_mask);
-                                            self.update_texture(ctx);
-                                        }
-                                        Tool::Rognage =>
-                                        {
-                                            if let Some(new_img) = rognage::apply_crop(&mut self.image_buffer, sx, sy, ex, ey)
+                                            Tool::Rectangle =>
                                             {
-                                                self.image_buffer = new_img;
-                                                self.original_image = self.image_buffer.clone();
-                                                self.texture = None;
-                                                self.selection_mask = None;
+                                                formes::draw_rect_pixels(&mut self.image_buffer, sx, sy, ex, ey, draw_color_pixels, self.brush_size, self.selection_mask);
+                                                self.update_texture(ctx);
                                             }
-                                        }
-                                        Tool::Selection =>
-                                        {
-                                            if sx == ex && sy == ey {
-                                                self.selection_mask = None;
-                                            } else {
-                                                self.selection_mask = Some((sx.min(ex), sy.min(ey), sx.max(ex), sy.max(ey)));
+                                            Tool::Triangle =>
+                                            {
+                                                formes::draw_triangle_pixels(&mut self.image_buffer, sx, sy, ex, ey, draw_color_pixels, self.brush_size, self.selection_mask);
+                                                self.update_texture(ctx);
                                             }
+                                            Tool::Circle =>
+                                            {
+                                                let radius = ((ex as f32 - start_x as f32).powi(2) + (ey as f32 - start_y as f32).powi(2)).sqrt() as i32;
+                                                formes::draw_circle_pixels(&mut self.image_buffer, start_x as i32, start_y as i32, radius, draw_color_pixels, self.brush_size, self.selection_mask);
+                                                self.update_texture(ctx);
+                                            }
+                                            Tool::Selection =>
+                                            {
+                                                if sx == ex && sy == ey {
+                                                    self.selection_mask = None;
+                                                } else {
+                                                    self.selection_mask = Some((sx.min(ex), sy.min(ey), sx.max(ex), sy.max(ey)));
+                                                }
+                                            }
+                                            _ => {}
                                         }
-                                        _ => {}
                                     }
                                 }
                             }
@@ -455,4 +654,30 @@ fn main() -> eframe::Result<()>
         options,
         Box::new(|cc| Ok(Box::new(QuasarApp::new(cc, image_name)))),
     )
+}
+
+fn draw_double_arrow_horizontal(painter: &egui::Painter, center: egui::Pos2, size: f32) {
+    let stroke_black = egui::Stroke::new(3.0, egui::Color32::BLACK);
+    let stroke_white = egui::Stroke::new(1.5, egui::Color32::WHITE);
+    
+    for stroke in &[stroke_black, stroke_white] {
+        painter.line_segment([center - egui::vec2(size/2.0, 0.0), center + egui::vec2(size/2.0, 0.0)], *stroke);
+        painter.line_segment([center - egui::vec2(size/2.0, 0.0), center - egui::vec2(size/2.0 - size/3.0, -size/3.0)], *stroke);
+        painter.line_segment([center - egui::vec2(size/2.0, 0.0), center - egui::vec2(size/2.0 - size/3.0, size/3.0)], *stroke);
+        painter.line_segment([center + egui::vec2(size/2.0, 0.0), center + egui::vec2(size/2.0 - size/3.0, -size/3.0)], *stroke);
+        painter.line_segment([center + egui::vec2(size/2.0, 0.0), center + egui::vec2(size/2.0 - size/3.0, size/3.0)], *stroke);
+    }
+}
+
+fn draw_double_arrow_vertical(painter: &egui::Painter, center: egui::Pos2, size: f32) {
+    let stroke_black = egui::Stroke::new(3.0, egui::Color32::BLACK);
+    let stroke_white = egui::Stroke::new(1.5, egui::Color32::WHITE);
+    
+    for stroke in &[stroke_black, stroke_white] {
+        painter.line_segment([center - egui::vec2(0.0, size/2.0), center + egui::vec2(0.0, size/2.0)], *stroke);
+        painter.line_segment([center - egui::vec2(0.0, size/2.0), center - egui::vec2(-size/3.0, size/2.0 - size/3.0)], *stroke);
+        painter.line_segment([center - egui::vec2(0.0, size/2.0), center - egui::vec2(size/3.0, size/2.0 - size/3.0)], *stroke);
+        painter.line_segment([center + egui::vec2(0.0, size/2.0), center + egui::vec2(-size/3.0, size/2.0 - size/3.0)], *stroke);
+        painter.line_segment([center + egui::vec2(0.0, size/2.0), center + egui::vec2(size/3.0, size/2.0 - size/3.0)], *stroke);
+    }
 }
